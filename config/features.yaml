@@ -1,0 +1,13 @@
+# Feature handling. All 25 features are low-cardinality categoricals.
+
+encoding:
+  method: onehot            # onehot | target (target encoding planned)
+  handle_unknown: ignore    # test has pop_group='Coloured' unseen in train
+  suppressed_token: __SUPPRESSED__   # kept as its own category (age_band)
+
+feature_groups:
+  demographics:    [age_band, sex, pop_group, marital]
+  household:       [hh_size_band, children_band, elderly_band, rooms_band, head_household]
+  dwelling:        [dwelling_type, tenure]
+  assets_income:   [asset_index, debt_count, internet, food_insecurity, employed, income_src_count, social_grant]
+  amenity_health:  [hazard_count, amenity_access, transport_mode, chronic_count, medical_aid, health_status, crime_victim]

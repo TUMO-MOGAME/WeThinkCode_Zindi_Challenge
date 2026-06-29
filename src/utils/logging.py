@@ -1,0 +1,11 @@
+"""Console logger."""
+import logging
+
+def get_logger(name: str = "gauteng") -> logging.Logger:
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        h = logging.StreamHandler()
+        h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%H:%M:%S"))
+        logger.addHandler(h)
+        logger.setLevel(logging.INFO)
+    return logger

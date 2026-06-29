@@ -1,0 +1,32 @@
+# data (CC-BY-SA, regenerate from Zindi)
+data/raw/*
+!data/raw/.gitkeep
+data/interim/*
+!data/interim/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# artifacts
+models/*.joblib
+models/*.cbm
+catboost_info/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+reports/figures/*
+!reports/figures/.gitkeep
+
+# AI-assistant files
+CLAUDE.md
+AGENTS.md
+.claude/
+
+# generated outputs (reproducible; keep folders, not contents)
+experiments/*
+!experiments/.gitkeep
+submissions/*
+!submissions/.gitkeep
+
+models/*
+!models/.gitkeep

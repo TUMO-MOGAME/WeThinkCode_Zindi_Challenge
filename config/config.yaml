@@ -1,0 +1,53 @@
+# Central project configuration. Paths are relative to the project root.
+
+project:
+  name: gauteng-service-gap
+  seed: 42
+
+paths:
+  raw_dir: data/raw
+  interim_dir: data/interim
+  processed_dir: data/processed
+  experiments_dir: experiments
+  models_dir: models
+  submissions_dir: submissions
+  reports_dir: reports
+  train_raw: data/raw/train.csv
+  val_raw: data/raw/val.csv
+  test_raw: data/raw/test.csv
+  sample_submission_raw: data/raw/SampleSubmission.csv
+  data_dictionary: data/raw/data_dictionary.csv
+
+columns:
+  id: ID
+  labels:
+    - no_water_access
+    - no_sanitation_access
+    - no_refuse_access
+    - no_energy_access
+    - no_education_access
+
+metric:
+  # Official Zindi weighted-average F1 weights (sum to 1.0).
+  weights:
+    no_water_access: 0.3304
+    no_refuse_access: 0.2329
+    no_education_access: 0.2119
+    no_energy_access: 0.1200
+    no_sanitation_access: 0.1048
+
+cv:
+  # PRIMARY drives all decisions. Secondary strategies are evaluated for robustness only.
+  primary: multilabel_stratified
+  n_splits: 5
+  shuffle: true
+  secondary:
+    - kfold
+    - stratified_combo
+
+threshold:
+  # Per-label F1-maximising thresholds searched on this grid, tuned on val.csv.
+  grid_start: 0.05
+  grid_stop: 0.95
+  grid_num: 91
+  tune_on: val
