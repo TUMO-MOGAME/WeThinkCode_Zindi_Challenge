@@ -1,234 +1,237 @@
 # Solution Documentation — Mapping Service-Delivery Gaps in Gauteng
 **Author:** Tumo Olorato Mogame
-**Final public leaderboard score:** 0.4084 (weighted-average F1)
+**Public leaderboard score:** 0.4084 (weighted-average F1) · **Private leaderboard score:** revealed at challenge close
+
+This document follows Zindi's recommended documentation structure: overview, architecture, ETL,
+data modeling, inference, run time, performance metrics, error handling & logging, and maintenance.
 
 ---
 
-## 1. Summary
+## 1. Overview and objectives
 
-The task is **multi-label classification**: for each Gauteng household, predict five binary
-service-gap labels — `no_water_access`, `no_sanitation_access`, `no_refuse_access`,
-`no_energy_access`, `no_education_access` — from 25 categorical survey features.
+**Purpose.** Predict, for each household in Gauteng, five binary **service-gap** labels —
+`no_water_access`, `no_sanitation_access`, `no_refuse_access`, `no_energy_access`,
+`no_education_access` — from 25 categorical survey features. This is a **multi-label classification**
+problem; the gaps tend to co-occur. The output helps direct government resources to the households
+that need them most.
 
-Submissions are scored with a **weighted average of per-label F1**:
-
+**Metric (objective optimised).** A weighted average of per-label F1:
 ```
-Score = 0.3304·F1(Water) + 0.2329·F1(Refuse) + 0.2119·F1(Education)
-      + 0.1200·F1(Energy) + 0.1048·F1(Sanitation)
-```
-
-The final solution is deliberately **simple and heavily regularised**, because the data is small,
-coarse (banded categories), and noisy. It has three components:
-
-1. **Leak-safe multi-label target encoding** of the categorical features.
-2. A regularised **CatBoost** classifier per label (one-vs-rest).
-3. **Per-label decision thresholds tuned on a large out-of-fold + validation sample** — the single
-   highest-impact step.
-
-Every more elaborate idea (per-label tuning, deeper hyper-parameter search, model ensembles,
-manual feature engineering) was tested against an honest cross-validation compass and **rejected
-because it did not improve generalisation** — on this dataset, added model freedom causes overfitting.
-
----
-
-## 2. Repository structure
-
-```
-config/        YAML configuration (paths, metric weights, CV, model, encoding)
-data/raw/      Original competition CSVs (train, val, test, SampleSubmission, data_dictionary)
-src/
-  data/        loading, cleaning, schema validation
-  features/    target encoding + feature selection
-  cv/          cross-validation splitters, the exact weighted-F1 metric, OOF driver
-  models/      model registry/zoo, pipeline assembly, ensembling
-  postprocess/ per-label F1 threshold tuning
-  utils/       seeding, IO, logging
-  train.py / predict.py / submit.py / tune.py     CLI entry points
-notebooks/
-  colab_submission.ipynb     self-contained, documented notebook that reproduces the solution
-experiments/   per-run CV scores, OOF predictions, thresholds (generated)
-submissions/   generated submission CSVs + submission log
+Score = 0.3304·F1(Water) + 0.2329·F1(Refuse) + 0.2119·F1(Education) + 0.1200·F1(Energy) + 0.1048·F1(Sanitation)
 ```
 
+**Expected outcome.** A reproducible model that, given the 25 features for unseen households,
+outputs the five 0/1 labels, scored by the weighted F1 above. Achieved: **0.4084 public** (rank 1 at
+time of writing).
+
+**Solution in one line.** Leak-safe multi-label **target encoding** → regularised **CatBoost** per
+label → **per-label decision thresholds tuned on a large out-of-fold + validation sample.**
+
 ---
 
-## 3. Environment & dependencies
-
-Open-source Python only. No AutoML, no paid services, no GPU.
+## 2. Architecture diagram (data flow)
 
 ```
-numpy, pandas, pyarrow, scikit-learn, pyyaml, joblib
-catboost            (gradient-boosted decision trees)
-iterative-stratification   (MultilabelStratifiedKFold)
-optuna              (hyper-parameter search, development only)
-matplotlib, seaborn (EDA only)
+                ┌──────────────────────────────────────────────────────────────┐
+                │                        RAW DATA (CSV)                          │
+                │            train.csv · val.csv · test.csv · SampleSubmission   │
+                └───────────────┬──────────────────────────────────────────────┘
+                                │  EXTRACT (src/data/make_dataset.py)
+                                ▼
+                ┌──────────────────────────────────────────────────────────────┐
+                │  TRANSFORM 1 — cleaning & validation (src/data/{make_dataset,  │
+                │  validate}.py): cast to string, keep __SUPPRESSED__, schema    │
+                │  & unseen-category checks                                      │
+                └───────────────┬──────────────────────────────────────────────┘
+                                │  LOAD -> interim parquet (data/interim/)
+                                ▼
+                ┌──────────────────────────────────────────────────────────────┐
+                │  TRANSFORM 2 — leak-safe multi-label TARGET ENCODING           │
+                │  (src/features/target_encoding.py), fit inside each CV fold    │
+                └───────────────┬──────────────────────────────────────────────┘
+                                ▼
+   ┌───────────────────────────────────────────┐     ┌──────────────────────────────────┐
+   │  MODELING (src/cv, src/models)            │     │  THRESHOLDS (src/postprocess)     │
+   │  CatBoost (OvR) + MultilabelStratified    │ --> │  per-label F1-max cutoffs tuned   │
+   │  5-fold OOF; metric = weighted-F1         │ OOF │  on OOF(train)+val (~9,400 rows)  │
+   └───────────────────────┬───────────────────┘     └───────────────┬──────────────────┘
+                           │  fit on full train                       │
+                           ▼                                          ▼
+                ┌──────────────────────────────────────────────────────────────┐
+                │  INFERENCE (src/predict.py, src/submit.py)                     │
+                │  predict_proba(test) → apply thresholds → binary labels        │
+                │  → validate vs SampleSubmission → submission.csv               │
+                └──────────────────────────────────────────────────────────────┘
 ```
 
-Install: `pip install -r requirements.txt` (or the install cell in the notebook).
+---
+
+## 3. ETL process
+
+**Extract.** Data source = the competition CSV files (`train.csv` 8,353 rows with labels,
+`val.csv` 1,080 labelled rows, `test.csv` 4,060 unlabelled rows, plus `SampleSubmission.csv`).
+Volume is small (~3 MB total); extraction is a one-time read with pandas. No external sources are used.
+
+**Transform.**
+- *Cleaning / validation* (`src/data/make_dataset.py`, `src/data/validate.py`): every feature is cast
+  to **string** so all 25 features are treated as categories; the privacy token
+  `age_band == "__SUPPRESSED__"` is kept as its own category. A schema check confirms feature columns
+  and submission columns; an unseen-category scan flags `pop_group="Coloured"` (present in test, not
+  train) so encoders absorb it via `handle_unknown='ignore'`. A data audit verified no missing values,
+  labels strictly 0/1, unique IDs, no train/test ID leakage, and low covariate shift. There are no
+  continuous features, so no outlier removal is required.
+- *Feature transform* (`src/features/target_encoding.py`): leak-safe multi-label **target encoding** —
+  each `(feature, label)` category is replaced by the smoothed mean of that label (smoothing = 20),
+  computed **out-of-fold** (internal cross-fitting) and fit only on training folds. 25 features × 5
+  labels → 125 numeric columns.
+
+**Load.** Cleaned data is written to **interim parquet** (`data/interim/`) for fast reuse; out-of-fold
+predictions, thresholds and per-run scores are persisted under `experiments/<run>/`; the fitted model
+is saved with `joblib`. The final binary predictions are written to `submissions/submission.csv`.
 
 ---
 
-## 4. How to reproduce
+## 4. Data modeling
 
-**Easiest (single notebook):** open `notebooks/colab_submission.ipynb` in Google Colab, upload the
-five challenge CSVs, and run all cells. It regenerates `submission.csv` (the 0.4084 file) end-to-end.
+**Assumptions / foundation.** The train/val/test split is **profile-disjoint** (no full 25-feature
+profile is shared across splits — verified), so a model cannot memorise households; it must generalise
+through **per-category statistics**. Target encoding is the representation that captures exactly this.
 
-**Via the package (CLI):**
-```bash
-pip install -r requirements.txt
-python -m src.data.make_dataset                                  # clean raw -> interim
-python -m src.cv.run_cv   --name champion                        # 5-fold OOF (saves OOF predictions)
-python -m src.train       --name champion                        # fit on full train
-python -m src.predict     --name champion                        # predict val + test
-python -m src.submit      --name champion --thresholds oof_val   # robust thresholds -> submission.csv
-```
-Model is set in `config/model.yaml` (`active: catboost`); encoding in `config/config.yaml`
-(`encoding.method: target`).
+**Feature selection / engineering.** All 25 provided categorical features are used, via target
+encoding (Section 3). Manual feature engineering (interactions, ordinal encodings, a deprivation
+composite) was tested and *reduced* cross-validation performance, so none is used. No normalization is
+required (target-encoded values are already on a 0–1 scale; CatBoost is scale-invariant).
 
----
+**Model / algorithm.** CatBoost (`CatBoostClassifier`, gradient-boosted decision trees), trained
+**one-vs-rest** (`MultiOutputClassifier` — one CatBoost per label). Chosen after benchmarking the full
+zoo (LogReg, RandomForest, ExtraTrees, HistGB, XGBoost, LightGBM, CatBoost): CatBoost was both
+highest-scoring and the most **reliable / well-calibrated** (its local-vs-leaderboard gap was the
+smallest and most stable).
 
-## 5. Data
+**Hyper-parameters.** `iterations=393, depth=4, learning_rate=0.0143, l2_leaf_reg=7.35` — found with
+Optuna and independently confirmed by grid and random search; early stopping selected ~363 iterations,
+confirming the choice. Settings are deliberately strong on regularisation (train↔CV gap ≈ 0.007).
 
-- `train.csv` — 8,353 rows, features + 5 labels. Used to **fit** the model.
-- `val.csv` — 1,080 rows, labelled. Used **only** to help set decision thresholds and to validate
-  locally. **The model is never trained on val.**
-- `test.csv` — 4,060 rows, features only. Predictions submitted.
+**Training process.** Fit one CatBoost per label on target-encoded features, on `train.csv` only.
 
-All 25 features are **categorical** (low-cardinality bands such as `asset_index = 3-4`,
-`dwelling_type = Informal`), drawn from housing, demographics, income, employment, household
-composition, amenity access, health and governance themes.
+**Validation.** 5-fold **MultilabelStratifiedKFold** out-of-fold (OOF) cross-validation. The selection
+metric is the exact competition **weighted-F1**. The honest "compass" used to accept/reject every
+change was the **validation score computed with thresholds tuned on independent OOF data** — this
+tracked the leaderboard closely (e.g. compass 0.4356 → public 0.4084).
 
----
-
-## 6. Data processing & cleaning
-
-A data audit confirmed the data is clean: **no missing values**, labels strictly 0/1, unique IDs,
-no train/test ID leakage, and **low covariate shift** between train and test. Processing steps:
-
-- Every feature is cast to **string** so all values are treated as categories.
-- `age_band = "__SUPPRESSED__"` (a privacy token, ~0.3% of rows) is kept as its **own category**.
-- One category (`pop_group = "Coloured"`) appears in test but not train; all encoders use
-  `handle_unknown='ignore'` / a global-mean fallback so unseen categories never break inference.
-- There are **no continuous numeric features**, so outlier removal does not apply. The categorical
-  analogue (very rare categories) is handled by encoding smoothing (Section 7).
-- Repeated feature rows are **not** removed — they are real survey respondents, and the model must
-  learn the conditional gap rate for each household profile.
-
-A key structural fact: the features collapse to ~825 unique "profiles", and **no full 25-feature
-profile is shared across train, val and test** (verified). A model therefore cannot memorise
-profiles; it must generalise through **per-category statistics**, which directly motivates the
-encoding below.
+**Decision thresholds (key step).** For each label, the F1-maximising cutoff is chosen by grid search
+over `[0.05, 0.95]`. Crucially, thresholds are tuned on the **OOF(train) + val sample (~9,400 rows)**,
+not the small val set alone — this stabilises the rare-label cutoffs and improved the leaderboard from
+0.389 to 0.408 (the single biggest gain). Thresholds were verified stable across repeated CV splits.
 
 ---
 
-## 7. Feature engineering — leak-safe multi-label target encoding
+## 5. Inference
 
-Each `(feature, label)` category is replaced by the **smoothed mean of that label** within the
-training data:
+**How new data is scored.** Given new household feature rows (e.g. `test.csv`):
+1. Cast features to string (same cleaning as training).
+2. Apply the **fitted** target encoder (full-train maps; unseen categories fall back to the global
+   mean) → 125 numeric features.
+3. `predict_proba` with the trained CatBoost models → a probability per label.
+4. Apply the saved per-label thresholds → binary 0/1 labels.
+5. Align to `SampleSubmission.csv` and validate the format → `submission.csv`.
 
-```
-encoded(category) = (count·mean + m·global_mean) / (count + m),   m = smoothing (= 20)
-```
+**Infrastructure.** Runs locally or in Google Colab on **CPU** — no GPU, no external services. The
+self-contained notebook `notebooks/colab_submission.ipynb` performs the full train → predict → submit
+flow; the `src/` package exposes the same via `python -m src.{train,predict,submit}`.
 
-This gives the model the predictive signal directly (the gap rate for households of each category),
-and the smoothing shrinks rare categories toward the global mean so they are not noisy. Because full
-profiles never repeat across splits, these per-category marginals are exactly what transfers to the
-test set.
-
-**Leakage control:** encoding is computed **out-of-fold** — internal K-fold cross-fitting inside
-`fit_transform`, so a training row never sees its own label — and is fit only on training folds.
-Implementation: `src/features/target_encoding.py` (`MultiLabelTargetEncoder`, a scikit-learn
-transformer). 25 features × 5 labels → 125 encoded numeric columns.
-
-Manual feature engineering (pairwise interactions, ordinal encodings, a "deprivation" composite) was
-tested and **reduced** cross-validation performance, so none is used.
+**Versioning / retraining.** Each run is parameterised by `config/` (model + encoding + CV) and a fixed
+seed (42), so any version is fully reproducible. To retrain on new data, replace the CSVs and re-run
+the pipeline; the saved model + thresholds (`models/`, `experiments/<run>/thresholds.json`) define a
+deployable version. No online/streaming inference is required for this challenge (batch scoring of
+`test.csv`).
 
 ---
 
-## 8. Cross-validation strategy
+## 6. Run time
 
-Five labels cannot be balanced with ordinary `StratifiedKFold`, so validation uses
-**MultilabelStratifiedKFold** (5 folds). For each candidate, out-of-fold (OOF) probabilities are
-collected on the full training set.
+| Stage | Approx. time (CPU) |
+|---|---|
+| Dependency install | ~1–2 min |
+| Data extract + clean | < 5 s |
+| 5-fold OOF cross-validation (CatBoost) | ~6–8 min |
+| Final fit on full train | ~1–1.5 min |
+| Predict val + test, threshold tuning, write submission | < 10 s |
+| **Total end-to-end** | **~8–12 minutes** |
 
-The decision metric throughout is the **exact competition weighted-F1** (`src/cv/evaluate.py`), not
-the macro-F1 that a naive baseline reports. The honest model-selection "compass" used is the
-**validation score obtained with thresholds tuned on independent OOF data** — this proved to track
-the leaderboard closely and was used to accept/reject every change.
-
----
-
-## 9. Model
-
-- **Algorithm:** CatBoost (`CatBoostClassifier`), gradient-boosted decision trees, chosen because it
-  was both the highest-scoring and the most **reliable / well-calibrated** model in a full
-  benchmark (LogReg, RandomForest, ExtraTrees, HistGB, XGBoost, LightGBM, CatBoost were all compared).
-- **Multi-label strategy:** one-vs-rest (`MultiOutputClassifier`) — one CatBoost per label.
-- **Hyper-parameters** (found with Optuna, confirmed independently by grid and random search):
-  `iterations=393, depth=4, learning_rate=0.0143, l2_leaf_reg=7.35`. These are deliberately strong
-  on regularisation; the train↔CV gap is ~0.007 (no overfitting). Early stopping independently
-  selected ~363 iterations, confirming the choice.
+Hardware: standard CPU (Google Colab CPU runtime / local CPU). No GPU.
 
 ---
 
-## 10. Decision-threshold optimisation (the key step)
+## 7. Performance metrics
 
-The labels are imbalanced (Energy ~4%, Education/Sanitation ~9%), so the F1-optimal cutoff is far
-from 0.5. For each label independently, the threshold that maximises that label's F1 is chosen by a
-grid search over `[0.05, 0.95]`. (Optimising each label separately is optimal because the weighted
-score is a sum of independent per-label F1 terms.)
+- **Public leaderboard:** **0.4084** (weighted-average F1) — rank 1 at submission time.
+- **Private leaderboard:** revealed at challenge close (the private 70% of the test set).
+- **Per-label F1 (public):** Water 0.531 · Refuse 0.439 · Sanitation 0.340 · Education 0.307 · Energy 0.250.
+- **Local validation metric used for all decisions:** weighted-F1 on held-out val with OOF-tuned
+  thresholds ("compass") — observed gap to the public LB ≈ 0.027, stable.
 
-**Critically, thresholds are tuned on the combined out-of-fold (8,353) + validation (1,080) sample
-(~9,400 rows), not on the small validation set alone.** Tuning on the tiny val set overfits the
-cutoffs for rare labels; using the large OOF+val sample makes them stable. This single change
-improved the leaderboard from **0.389 to 0.408** — a larger gain than any model change — and the
-resulting thresholds were verified to be stable across repeated cross-validation splits.
-
----
-
-## 11. Final submission generation
-
-1. Fit the champion CatBoost on all of `train.csv` (target-encoded features).
-2. Predict probabilities for `val.csv` and `test.csv`.
-3. Tune per-label thresholds on OOF(train) + val.
-4. Apply those thresholds to the test probabilities to produce binary labels.
-5. Align to `SampleSubmission.csv`, validate the format, and save `submission.csv`.
-
----
-
-## 12. Reproducibility
-
-- **Seed:** a single global seed (42) is set for Python, NumPy and all models. Re-running reproduces
-  the same submission.
-- **Hardware:** CPU only — no GPU used.
-- **Runtime:** approximately 8–12 minutes end-to-end on a standard CPU (Google Colab), including
-  dependency installation; the time is dominated by 5-fold cross-validation and the final fit.
-- **No external data** was used — only the provided competition files.
-- **No collaboration** outside the team and no private code sharing.
-
----
-
-## 13. Results
+**Progression (what moved the score):**
 
 | Stage | Public LB |
 |---|---|
-| Logistic-regression / one-hot baseline | 0.382 |
+| LogReg + one-hot baseline | 0.382 |
 | CatBoost + target encoding (val thresholds) | 0.389 |
 | **CatBoost + target encoding + robust thresholds (final)** | **0.408** |
 
-The two decisive levers were **target encoding** (+0.007) and **robust thresholds** (+0.020).
-
-Per-label F1 (final): Water 0.531 · Refuse 0.439 · Sanitation 0.340 · Education 0.307 · Energy 0.250.
+Two decisive levers: target encoding (+0.007) and robust thresholds (+0.020).
 
 ---
 
-## 14. What was explored and rejected (and why)
+## 8. Error handling and logging
 
-Documented for transparency — each was measured on the honest compass and did **not** help:
+- **Schema & input validation** (`src/data/validate.py`): asserts feature columns are present and the
+  submission columns/format match `SampleSubmission.csv`; logs any categories present in val/test but
+  absent from train (handled, not fatal); reports missing-value counts.
+- **Unseen categories** never raise — encoders use `handle_unknown='ignore'` / global-mean fallback.
+- **Submission guards** (`src/submit.py`): assertions that there are no missing IDs vs the sample
+  submission, that column order matches exactly, and that every predicted value is in `{0, 1}` — a
+  malformed submission fails fast rather than being uploaded.
+- **Logging** (`src/utils/logging.py`): a console logger reports per-fold scores, the train↔CV gap,
+  chosen thresholds, and output paths, so a reviewer can see exactly what happened at each step.
+- **Reproducibility guard** (`src/utils/seed.py`): a single seed is set for Python, NumPy and the
+  models; re-running yields the same result.
+
+---
+
+## 9. Maintenance and monitoring
+
+- **Retraining.** Drop new/updated CSVs into `data/raw/` and re-run the pipeline; the config-driven
+  design means no code changes are needed to refresh the model.
+- **Monitoring.** If deployed, track per-label F1 and the predicted positive-rate per label against the
+  historical survey rates — a large drift in predicted rates is the earliest sign that thresholds need
+  re-tuning (the most sensitive component for rare labels).
+- **Scaling.** The data is small and CPU-only; the pipeline scales linearly and would comfortably
+  handle far larger surveys. The heaviest step (5-fold CV) is embarrassingly parallel across folds.
+- **Lifecycle / versioning.** Every run is fully specified by `config/` + seed and saves its model,
+  thresholds and scores under `experiments/<run>/` and `models/`, so versions are auditable and any
+  past result can be reproduced exactly.
+
+---
+
+## 10. Reproducibility & environment
+
+- **Seed:** 42 (Python, NumPy, CatBoost). Re-running reproduces the submission.
+- **Dependencies:** see `requirements.txt` (open-source only; pinned versions). No AutoML, no GPU.
+- **Data:** only the provided competition files; **no external datasets**.
+- **Collaboration:** solo work; no private code sharing.
+- **Run order:** `make_dataset → run_cv → train → predict → submit` (CLI), or run
+  `notebooks/colab_submission.ipynb` top-to-bottom.
+
+---
+
+## 11. What was explored and rejected (design decisions)
+
+Each was measured on the honest compass and did **not** improve generalisation — recorded for transparency:
 
 | Idea | Outcome |
 |---|---|
-| Full model zoo (LogReg, RF, ExtraTrees, HistGB, XGBoost, LightGBM) | all tie/worse than CatBoost; CatBoost most reliable |
+| Full model zoo (LogReg, RF, ExtraTrees, HistGB, XGBoost, LightGBM) | tie/worse than CatBoost; CatBoost most reliable |
 | Manual feature engineering (interactions, ordinal, deprivation index) | reduced CV — added variance, no signal |
 | Per-label model selection + per-label tuning | overfit — leaderboard dropped 0.389 → 0.369 |
 | Deeper Optuna / grid / random search, early stopping | no clear gain; deeper search overfit |
@@ -239,10 +242,10 @@ Documented for transparency — each was measured on the honest compass and did 
 
 ---
 
-## 15. Key takeaways
+## 12. Key takeaways
 
 On small, coarse, noisy data the winning approach is **discipline, not complexity**: a simple
 regularised model, an honest validation compass, and well-chosen decision thresholds, while rejecting
-every change that does not demonstrably improve out-of-sample performance. The only learnable signal
-is the per-category gap rate, which target encoding captures and which all reasonable models extract
+every change that does not demonstrably improve out-of-sample performance. The only learnable signal is
+the per-category gap rate, which target encoding captures and which all reasonable models extract
 similarly — so robustness (CatBoost + stable thresholds), not model novelty, decides the result.
