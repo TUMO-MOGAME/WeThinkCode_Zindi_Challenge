@@ -2,11 +2,11 @@
 # `strategy`: ovr (MultiOutputClassifier, one model per label) | chain (ClassifierChain).
 # `search`: Optuna space used by `python -m src.tune`.
 
-active: logreg
+active: catboost     # champion: tuned CatBoost on target encoding (OOF 0.4413)
 strategy: ovr
 
 logreg:
-  params: {C: 0.1, class_weight: balanced, max_iter: 2000}
+  params: {C: 0.015, class_weight: balanced, max_iter: 2000}   # tuned
   search:
     C: {type: float, low: 0.001, high: 100.0, log: true}
 
@@ -56,7 +56,7 @@ lgbm:
     reg_lambda:        {type: float, low: 0.01, high: 10.0, log: true}
 
 catboost:
-  params: {iterations: 500, learning_rate: 0.05, depth: 5, l2_leaf_reg: 3.0}
+  params: {iterations: 393, learning_rate: 0.0143, depth: 4, l2_leaf_reg: 7.35}   # tuned (CHAMPION #6, LB 0.4084). SqrtBalanced tried -> compass +0.0046 but LB 0.4064 (within noise), reverted.
   search:
     iterations:    {type: int,   low: 300, high: 900}
     learning_rate: {type: float, low: 0.01, high: 0.1, log: true}

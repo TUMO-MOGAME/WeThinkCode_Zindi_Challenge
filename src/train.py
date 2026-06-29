@@ -14,7 +14,11 @@ def train(cfg, mcfg, exp_name):
     X, y = train[feats], train[labels].values.astype(int)
     name, strategy = mcfg["active"], mcfg.get("strategy", "ovr")
     params = mcfg.get(name, {}).get("params", {})
-    model = make_model(name, feats, strategy, params, seed)
+    enc = cfg.get("encoding", {})
+    model = make_model(name, feats, strategy, params, seed,
+                       encoding=enc.get("method", "onehot"),
+                       handle_unknown=enc.get("handle_unknown", "ignore"),
+                       n_labels=len(labels), target_smoothing=enc.get("target_smoothing", 20.0))
     model.fit(X, y)
     mdir = ensure_dir(cfg["paths"]["models_dir"])
     mpath = os.path.join(mdir, f"{exp_name}.joblib")

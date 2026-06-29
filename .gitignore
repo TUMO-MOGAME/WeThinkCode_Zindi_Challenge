@@ -30,3 +30,7 @@ submissions/*
 
 models/*
 !models/.gitkeep
+
+# throwaway experiment scripts / cached arrays
+_*.py
+*.npz

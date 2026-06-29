@@ -15,9 +15,13 @@ def _oof(cfg, mcfg, feats, X, y, splitter_name, grid, weights, labels, seed, log
     splitter = get_splitter(splitter_name, cfg["cv"]["n_splits"], cfg["cv"]["shuffle"], seed)
     name, strategy = mcfg["active"], mcfg.get("strategy", "ovr")
     params = mcfg.get(name, {}).get("params", {})
+    enc = cfg.get("encoding", {})
     oof = np.zeros((len(X), len(labels))); rows = []
     for k, (tr, va) in enumerate(splitter.split(X, y)):
-        m = make_model(name, feats, strategy, params, seed)
+        m = make_model(name, feats, strategy, params, seed,
+                       encoding=enc.get("method", "onehot"),
+                       handle_unknown=enc.get("handle_unknown", "ignore"),
+                       n_labels=len(labels), target_smoothing=enc.get("target_smoothing", 20.0))
         m.fit(X.iloc[tr], y[tr])
         oof[va] = predict_proba_matrix(m, X.iloc[va])
         thr = tune_thresholds(y[va], oof[va], grid)

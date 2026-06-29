@@ -6,8 +6,9 @@ from .registry import get_estimator
 from ..features.encoders import build_preprocessor
 
 def make_model(name, features, strategy="ovr", params=None, seed=42,
-               encoding="onehot", handle_unknown="ignore"):
-    pre = build_preprocessor(features, method=encoding, handle_unknown=handle_unknown)
+               encoding="onehot", handle_unknown="ignore", n_labels=5, target_smoothing=20.0):
+    pre = build_preprocessor(features, method=encoding, handle_unknown=handle_unknown,
+                             n_labels=n_labels, smoothing=target_smoothing, seed=seed)
     est = get_estimator(name, params, seed)
     if strategy == "ovr":
         head = MultiOutputClassifier(est)

@@ -36,6 +36,11 @@ metric:
     no_energy_access: 0.1200
     no_sanitation_access: 0.1048
 
+encoding:
+  method: target           # onehot | target | onehot_target  (target wins: OOF 0.4396, -0.003 gap)
+  handle_unknown: ignore   # test has pop_group='Coloured' unseen in train
+  target_smoothing: 20.0   # higher = stronger pull toward global mean (regularises rare categories)
+
 cv:
   # PRIMARY drives all decisions. Secondary strategies are evaluated for robustness only.
   primary: multilabel_stratified
